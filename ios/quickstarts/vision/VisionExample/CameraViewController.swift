@@ -427,11 +427,12 @@ class CameraViewController: UIViewController {
     }
     options.confidenceThreshold = NSNumber(floatLiteral: Constant.labelConfidenceThreshold)
     let onDeviceLabeler = ImageLabeler.imageLabeler(options: options)
-    let labels: [ImageLabel]
+    var labels: [ImageLabel]
     var labelingError: Error?
     var resultsText: String? = nil
     do {
       labels = try onDeviceLabeler.results(in: visionImage)
+        labels = labels.filter{ $0.index == 257 }
       resultsText = labels.map { label -> String in
         return "Label: \(label.text), Confidence: \(label.confidence), Index: \(label.index)"
       }.joined(separator: "\n")
@@ -539,6 +540,131 @@ class CameraViewController: UIViewController {
       }
     }
   }
+    
+    private func detectObjectsOnDeviceChanges(in image: VisionImage, width: CGFloat, height: CGFloat, options: CommonObjectDetectorOptions) {
+        guard let imgLDescription = detectLabels(in: image) else {
+            DispatchQueue.main.sync {
+                self.updatePreviewOverlayViewWithLastFrame()
+            }
+            return
+        }
+        let detector = ObjectDetector.objectDetector(options: options)
+        var objects: [Object] = []
+        var detectionError: Error? = nil
+        do {
+            objects = try detector.results(in: image)
+        } catch let error {
+            detectionError = error
+        }
+        
+        weak var weakSelf = self
+        DispatchQueue.main.sync {
+            guard let strongSelf = weakSelf else {
+                print("Self is nil!")
+                return
+            }
+            strongSelf.self.updatePreviewOverlayViewWithLastFrame()
+            if let detectionError = detectionError {
+                print("Failed to detect objects with error: \(detectionError.localizedDescription).")
+                return
+                
+            }
+            guard !objects.isEmpty else {
+                print("On-Device object detector returned no results.")
+                return
+            }
+            for object in objects {
+                let normalizedRect = CGRect(
+                    x: object.frame.origin.x / width,
+                    y: object.frame.origin.y / height,
+                    width: object.frame.size.width / width,
+                    height: object.frame.size.height / height
+                )
+                let standardizedRect = strongSelf.previewLayer.layerRectConverted(
+                    fromMetadataOutputRect: normalizedRect
+                ).standardized
+                UIUtilities.addRectangle(
+                    standardizedRect,
+                    to: strongSelf.annotationOverlayView,
+                    color: UIColor.green
+                )
+                let label = UILabel(frame: standardizedRect)
+                /*
+                var description = ""
+                if let trackingID = object.trackingID {
+                    description += "Object ID: " + trackingID.stringValue + "\n"
+                }
+                description += object.labels.enumerated().map { (index, label) in
+                    "Label \(index): \(label.text), \(label.confidence), \(label.index)"
+                }.joined(separator: "\n")
+                
+                label.text = description
+                */
+                label.text = imgLDescription
+                label.numberOfLines = 0
+                label.adjustsFontSizeToFitWidth = true
+                strongSelf.rotate(label, orientation: image.orientation)
+                strongSelf.annotationOverlayView.addSubview(label)
+            }
+        }
+    }
+    
+    private func detectLabels(in visionImage: VisionImage, shouldUseCustomModel: Bool = false) -> String? {
+        var options: CommonImageLabelerOptions!
+        options = ImageLabelerOptions()
+        options.confidenceThreshold = NSNumber(floatLiteral: 0.6)
+        let onDeviceLabeler = ImageLabeler.imageLabeler(options: options)
+        var labels: [ImageLabel]
+        var labelingError: Error?
+        var resultsText: String? = nil
+        do {
+            labels = try onDeviceLabeler.results(in: visionImage)
+            let tLabels = labels.first{ $0.index == 257 }
+            //$0.index == 257
+
+            resultsText = tLabels.map { label -> String in
+                return "Label: \(label.text), Confidence: \(label.confidence), Index: \(label.index)"
+            }
+        } catch let error {
+            labelingError = error
+        }
+        return resultsText
+        weak var weakSelf = self
+        DispatchQueue.main.sync {
+            guard let strongSelf = weakSelf else {
+                print("Self is nil!")
+                return
+            }
+            strongSelf.updatePreviewOverlayViewWithLastFrame()
+            if let labelingError = labelingError {
+                print("Image labeling failed with error: \(labelingError.localizedDescription)")
+                return
+            }
+            guard let resultsText = resultsText else { return }
+            guard resultsText.count > 0 else { return }
+            
+            let normalizedRect = CGRect(
+                x: Constant.imageLabelResultFrameX,
+                y: Constant.imageLabelResultFrameY,
+                width: Constant.imageLabelResultFrameWidth,
+                height: Constant.imageLabelResultFrameHeight
+            )
+            let standardizedRect = strongSelf.previewLayer.layerRectConverted(
+                fromMetadataOutputRect: normalizedRect
+            ).standardized
+            UIUtilities.addRectangle(
+                standardizedRect,
+                to: strongSelf.annotationOverlayView,
+                color: UIColor.gray
+            )
+            let uiLabel = UILabel(frame: standardizedRect)
+            uiLabel.text = resultsText
+            uiLabel.numberOfLines = 0
+            uiLabel.adjustsFontSizeToFitWidth = true
+            strongSelf.rotate(uiLabel, orientation: visionImage.orientation)
+            strongSelf.annotationOverlayView.addSubview(uiLabel)
+        }
+    }
 
   // MARK: - Private
 
@@ -1006,7 +1132,14 @@ extension CameraViewController: AVCaptureVideoDataOutputSampleBufferDelegate {
     case .onDeviceImageLabelsCustom:
       detectLabels(
         in: visionImage, width: imageWidth, height: imageHeight, shouldUseCustomModel: true)
-    case .onDeviceObjectProminentNoClassifier, .onDeviceObjectProminentWithClassifier,
+    case .onDeviceObjectProminentWithClassifier:
+        // The `options.detectorMode` defaults to `.stream`
+        let options = ObjectDetectorOptions()
+        options.shouldEnableClassification = shouldEnableClassification
+        options.shouldEnableMultipleObjects = shouldEnableMultipleObjects
+        self.detectObjectsOnDeviceChanges(in: visionImage, width: imageWidth, height: imageHeight, options: options)
+        break
+    case .onDeviceObjectProminentNoClassifier,
       .onDeviceObjectMultipleNoClassifier, .onDeviceObjectMultipleWithClassifier:
       // The `options.detectorMode` defaults to `.stream`
       let options = ObjectDetectorOptions()
@@ -1079,7 +1212,8 @@ private enum Constant {
   static let videoDataOutputQueueLabel = "com.google.mlkit.visiondetector.VideoDataOutputQueue"
   static let sessionQueueLabel = "com.google.mlkit.visiondetector.SessionQueue"
   static let noResultsMessage = "No Results"
-  static let localModelFile = (name: "bird", type: "tflite")
+//  static let localModelFile = (name: "bird", type: "tflite")
+    static let localModelFile = (name: "phone_detection", type: "tflite")
   static let labelConfidenceThreshold = 0.75
   static let smallDotRadius: CGFloat = 4.0
   static let lineWidth: CGFloat = 3.0

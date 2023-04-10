@@ -1,7 +1,7 @@
 # Uncomment the next line to define a global platform for your project
 # platform :ios, '9.0'
 
-source 'sso://cpdc-test/mlkit'
+#source 'sso://cpdc-test/mlkit'
 source 'https://github.com/CocoaPods/Specs.git'
 
 target 'objc-snippets' do
